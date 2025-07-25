@@ -109,7 +109,33 @@ class CNNPlanner(torch.nn.Module):
 
         self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN), persistent=False)
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD), persistent=False)
+        self.cnnmodel = nn.Sequential(
+            #doubling the channels each layer and reducing spatial dimension by half
+            nn.Conv2d(3, 32, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.BatchNorm2d(32),
 
+            
+            nn.Conv2d(32, 64, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.BatchNorm2d(64),
+
+            
+            nn.Conv2d(64, 128, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.BatchNorm2d(128),
+
+            
+            nn.Conv2d(128, 128, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.BatchNorm2d(128),
+
+            
+            nn.Flatten(),
+            nn.Linear(6272, 256),  # Intermediate hidden layer
+            nn.ReLU(),
+            nn.Linear(256, 2 * n_waypoints)
+        )
     def forward(self, image: torch.Tensor, **kwargs) -> torch.Tensor:
         """
         Args:
@@ -121,7 +147,8 @@ class CNNPlanner(torch.nn.Module):
         x = image
         x = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
 
-        raise NotImplementedError
+        output = self.cnnmodel(x)
+        return output.view(x.shape[0], self.n_waypoints, 2)
 
 
 MODEL_FACTORY = {
