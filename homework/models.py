@@ -25,13 +25,15 @@ class MLPPlanner(nn.Module):
         self.n_waypoints = n_waypoints
 
         input_dimension=n_track*2*2 #1 sample contains left cordinate(x1,y1) and right cooridnate (x2,y2) and we have n track input cordinates for each left and right 
-        hidden_dimension=128
+        hidden_dimension=256
         output_dimension=n_waypoints*2#each waypoint is 2d cord
         self.mlpplanner=nn.Sequential(
             nn.Linear(input_dimension, hidden_dimension),
             nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dimension, hidden_dimension),
             nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dimension, output_dimension)
         )
 
@@ -54,7 +56,7 @@ class MLPPlanner(nn.Module):
         Returns:
             torch.Tensor: future waypoints with shape (b, n_waypoints, 2)
         """
-        x = torch.cat([track_left, track_right], dim=-1)
+        x = torch.cat([track_left, track_right], dim=1)
         x = x.view(x.shape[0], -1)
         output = self.mlpplanner(x)
         return output.view(x.shape[0], self.n_waypoints, 2) 
