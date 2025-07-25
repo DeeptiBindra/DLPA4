@@ -13,8 +13,9 @@ import torch
 import torch.utils.tensorboard as tb
 import torch.nn as nn
 
-from .models import load_model, save_model
+from .models import load_model, save_model, CNNPlanner  # <-- Added CNNPlanner import
 from .datasets.road_dataset import load_data
+
 
 def train(
     exp_dir: str = "logs",
@@ -40,42 +41,51 @@ def train(
 
     loss_fn = nn.MSELoss(reduction="none")
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-   
+
     for epoch in range(num_epoch):
         model.train()
         train_loss = 0
         for batch in train_data:
-            track_left = batch["track_left"].to(device)    
-            track_right = batch["track_right"].to(device)   
-            waypoints = batch["waypoints"].to(device)   
-            waypoints_mask = batch["waypoints_mask"].to(device) 
-
             optimizer.zero_grad()
-            waypoints_pred = model(track_left=track_left, track_right=track_right)
-           
+            waypoints = batch["waypoints"].to(device)
+            waypoints_mask = batch["waypoints_mask"].to(device)
+
+            if model_name == "cnn_planner":
+                image = batch["image"].to(device)
+                waypoints_pred = model(image=image)
+            else:
+                track_left = batch["track_left"].to(device)
+                track_right = batch["track_right"].to(device)
+                waypoints_pred = model(track_left=track_left, track_right=track_right)
+
             loss = loss_fn(waypoints_pred, waypoints)  # shape: (B, n_waypoints, 2)
             loss = (loss * waypoints_mask.unsqueeze(-1)).mean()
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
 
-        logger.add_scalar("mlpplanner_train_loss", train_loss / len(train_data), epoch)
+        logger.add_scalar(f"{model_name}_train_loss", train_loss / len(train_data), epoch)
 
-        
         model.eval()
         val_loss = 0
         with torch.inference_mode():
             for batch in val_data:
-                
-                track_left = batch["track_left"].to(device)    
-                track_right = batch["track_right"].to(device)   
-                waypoints = batch["waypoints"].to(device)   
+                waypoints = batch["waypoints"].to(device)
                 waypoints_mask = batch["waypoints_mask"].to(device)
-                waypoints_pred = model(track_left=track_left, track_right=track_right)
+
+                if model_name == "cnn_planner":
+                    image = batch["image"].to(device)
+                    waypoints_pred = model(image=image)
+                else:
+                    track_left = batch["track_left"].to(device)
+                    track_right = batch["track_right"].to(device)
+                    waypoints_pred = model(track_left=track_left, track_right=track_right)
+
                 loss = loss_fn(waypoints_pred, waypoints)
                 loss = (loss * waypoints_mask.unsqueeze(-1)).mean()
                 val_loss += loss.item()
-        logger.add_scalar("mlpplanner_val_loss", val_loss / len(val_data), epoch)
+
+        logger.add_scalar(f"{model_name}_val_loss", val_loss / len(val_data), epoch)
 
         if epoch == 0 or epoch == num_epoch - 1 or (epoch + 1) % 10 == 0:
             print(
@@ -87,6 +97,7 @@ def train(
     save_model(model)
     torch.save(model.state_dict(), log_dir / f"{model_name}.th")
     print(f"Model saved to {log_dir / f'{model_name}.th'}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
