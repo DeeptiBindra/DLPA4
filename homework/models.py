@@ -132,7 +132,7 @@ class CNNPlanner(torch.nn.Module):
 
             
             nn.Flatten(),
-            nn.Linear(6272, 256),  # Intermediate hidden layer
+            nn.Linear(6144, 256),  # Intermediate hidden layer
             nn.ReLU(),
             nn.Linear(256, 2 * n_waypoints)
         )
