@@ -119,7 +119,7 @@ class TransformerPlanner(nn.Module):
         """
         x = torch.cat([track_left, track_right], dim=1)
         keyvalue=self.encoder_embed(x)
-        keyvalue = self.pos_encoder(keyvalue)
+        #keyvalue = self.pos_encoder(keyvalue)
         query=self.query_embed(torch.arange(self.n_waypoints, device=x.device)).unsqueeze(0).repeat(x.size(0), 1, 1)
         output=self.output_proj(self.transformerdecoder(query,keyvalue))
         return output
