@@ -2,6 +2,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import math
 
 HOMEWORK_DIR = Path(__file__).resolve().parent
 INPUT_MEAN = [0.2788, 0.2657, 0.2629]
@@ -61,7 +62,18 @@ class MLPPlanner(nn.Module):
         output = self.mlpplanner(x)
         return output.view(x.shape[0], self.n_waypoints, 2) 
 
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=100):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0))
 
+    def forward(self, x):
+        return x + self.pe[:, :x.size(1)]
 class TransformerPlanner(nn.Module):
     def __init__(
         self,
@@ -73,7 +85,7 @@ class TransformerPlanner(nn.Module):
 
         self.n_track = n_track
         self.n_waypoints = n_waypoints
-
+        self.pos_encoder = PositionalEncoding(d_model)
         self.query_embed = nn.Embedding(n_waypoints, d_model)
         self.encoder_embed = nn.Linear(2, d_model)#project input to higher dimension
         transformer_decoder_layer = nn.TransformerDecoderLayer(
@@ -107,6 +119,7 @@ class TransformerPlanner(nn.Module):
         """
         x = torch.cat([track_left, track_right], dim=1)
         keyvalue=self.encoder_embed(x)
+        keyvalue = self.pos_encoder(keyvalue)
         query=self.query_embed(torch.arange(self.n_waypoints, device=x.device)).unsqueeze(0).repeat(x.size(0), 1, 1)
         output=self.output_proj(self.transformerdecoder(query,keyvalue))
         return output
