@@ -90,10 +90,10 @@ class TransformerPlanner(nn.Module):
         self.encoder_embed = nn.Linear(2, d_model)#project input to higher dimension
         transformer_decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
-            nhead=4,
+            nhead=8,
             batch_first=True,
         )#embeddings as queries
-        self.transformerdecoder = nn.TransformerDecoder(transformer_decoder_layer, num_layers=4)
+        self.transformerdecoder = nn.TransformerDecoder(transformer_decoder_layer, num_layers=8)
 
         self.query_embed = nn.Embedding(n_waypoints, d_model)
         self.output_proj = nn.Linear(d_model, 2)#project higher dimension to output
