@@ -40,6 +40,9 @@ def train(
     val_data = load_data("drive_data/val", shuffle=False, batch_size=batch_size, num_workers=2)
 
     loss_fn = nn.MSELoss(reduction="none")
+    if model_name == "transformer_planner":
+        loss_fn = nn.L1Loss(reduction="none")
+        num_epoch=100
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     for epoch in range(num_epoch):
