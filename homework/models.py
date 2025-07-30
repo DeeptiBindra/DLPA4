@@ -63,8 +63,10 @@ class MLPPlanner(nn.Module):
         return output.view(x.shape[0], self.n_waypoints, 2) 
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=100):
+    def __init__(self, d_model, max_len=100, dropout=0.1):
         super().__init__()
+        self.dropout = nn.Dropout(dropout)
+        
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
@@ -73,30 +75,79 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe.unsqueeze(0))
 
     def forward(self, x):
-        return x + self.pe[:, :x.size(1)]
+        x = x + self.pe[:, :x.size(1)]
+        return self.dropout(x)
 class TransformerPlanner(nn.Module):
     def __init__(
         self,
         n_track: int = 10,
         n_waypoints: int = 3,
-        d_model: int = 64,
+        d_model: int = 128,  # Increased model dimension
+        nhead: int = 8,
+        num_layers: int = 6,  # Reduced layers for better generalization
+        dropout: float = 0.1,
     ):
         super().__init__()
 
         self.n_track = n_track
         self.n_waypoints = n_waypoints
-        self.pos_encoder = PositionalEncoding(d_model)
+        self.d_model = d_model
+        
+        # Enhanced input processing
+        self.track_embed = nn.Sequential(
+            nn.Linear(2, d_model // 2),
+            nn.ReLU(),
+            nn.LayerNorm(d_model // 2),
+            nn.Linear(d_model // 2, d_model)
+        )
+        
+        # Separate embeddings for left and right tracks
+        self.track_type_embed = nn.Embedding(2, d_model)  # 0 for left, 1 for right
+        
+        # Enhanced positional encoding
+        self.pos_encoder = PositionalEncoding(d_model, dropout=dropout)
+        
+        # Query embeddings for waypoints
         self.query_embed = nn.Embedding(n_waypoints, d_model)
-        self.encoder_embed = nn.Linear(2, d_model)#project input to higher dimension
+        
+        # Transformer decoder with improved configuration
         transformer_decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
-            nhead=8,
+            nhead=nhead,
+            dim_feedforward=d_model * 4,
+            dropout=dropout,
+            activation='gelu',  # Better activation function
             batch_first=True,
-        )#embeddings as queries
-        self.transformerdecoder = nn.TransformerDecoder(transformer_decoder_layer, num_layers=8)
-
-        self.query_embed = nn.Embedding(n_waypoints, d_model)
-        self.output_proj = nn.Linear(d_model, 2)#project higher dimension to output
+            norm_first=True,  # Pre-norm for better training stability
+        )
+        self.transformer_decoder = nn.TransformerDecoder(
+            transformer_decoder_layer, 
+            num_layers=num_layers
+        )
+        
+        # Enhanced output projection with residual connection
+        self.output_proj = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model // 2, 2)
+        )
+        
+        # Learnable output scaling for better coordinate prediction
+        self.output_scale = nn.Parameter(torch.ones(2))
+        
+        # Initialize weights
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize weights with proper scaling"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Embedding):
+                nn.init.normal_(module.weight, std=0.02)
 
     def forward(
         self,
@@ -117,12 +168,40 @@ class TransformerPlanner(nn.Module):
         Returns:
             torch.Tensor: future waypoints with shape (b, n_waypoints, 2)
         """
-        x = torch.cat([track_left, track_right], dim=1)
-        keyvalue=self.encoder_embed(x)
-        keyvalue = self.pos_encoder(keyvalue)
-        query=self.query_embed(torch.arange(self.n_waypoints, device=x.device)).unsqueeze(0).repeat(x.size(0), 1, 1)
-        output=self.output_proj(self.transformerdecoder(query,keyvalue))
-        return output
+        batch_size = track_left.size(0)
+        device = track_left.device
+        
+        # Process track boundaries separately
+        left_features = self.track_embed(track_left)  # (b, n_track, d_model)
+        right_features = self.track_embed(track_right)  # (b, n_track, d_model)
+        
+        # Add track type embeddings
+        left_type = self.track_type_embed(torch.zeros(batch_size, self.n_track, device=device, dtype=torch.long))
+        right_type = self.track_type_embed(torch.ones(batch_size, self.n_track, device=device, dtype=torch.long))
+        
+        left_features = left_features + left_type
+        right_features = right_features + right_type
+        
+        # Combine left and right track features
+        track_features = torch.cat([left_features, right_features], dim=1)  # (b, 2*n_track, d_model)
+        
+        # Add positional encoding
+        track_features = self.pos_encoder(track_features)
+        
+        # Create query embeddings for waypoints
+        query_indices = torch.arange(self.n_waypoints, device=device)
+        queries = self.query_embed(query_indices).unsqueeze(0).expand(batch_size, -1, -1)
+        
+        # Apply transformer decoder
+        output_features = self.transformer_decoder(queries, track_features)
+        
+        # Project to waypoint coordinates
+        waypoints = self.output_proj(output_features)
+        
+        # Apply learnable scaling
+        waypoints = waypoints * self.output_scale.unsqueeze(0).unsqueeze(0)
+        
+        return waypoints
 
 
 class CNNPlanner(torch.nn.Module):

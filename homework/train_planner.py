@@ -39,10 +39,20 @@ def train(
     train_data = load_data("drive_data/train", shuffle=True, batch_size=batch_size, num_workers=2)
     val_data = load_data("drive_data/val", shuffle=False, batch_size=batch_size, num_workers=2)
 
-    loss_fn = nn.MSELoss(reduction="none")
+    # Enhanced loss function for transformer planner
     if model_name == "transformer_planner":
-        loss_fn = nn.L1Loss(reduction="none")
+        # Weighted loss that emphasizes lateral error more
+        def weighted_loss_fn(pred, target):
+            l1_loss = nn.L1Loss(reduction="none")(pred, target)
+            # Weight lateral error (y-axis) more heavily than longitudinal (x-axis)
+            weights = torch.tensor([1.0, 1.5], device=pred.device)  # [longitudinal, lateral]
+            weighted_loss = l1_loss * weights.unsqueeze(0).unsqueeze(0)
+            return weighted_loss
+        loss_fn = weighted_loss_fn
         num_epoch=100
+    else:
+        loss_fn = nn.MSELoss(reduction="none")
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     for epoch in range(num_epoch):
