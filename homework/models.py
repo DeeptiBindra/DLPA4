@@ -2,6 +2,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as checkpoint
 import math
 
 HOMEWORK_DIR = Path(__file__).resolve().parent
@@ -65,38 +66,81 @@ class MLPPlanner(nn.Module):
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=100):
         super().__init__()
+        # Pre-compute positional encodings and register as buffer
         pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * 
+                           (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe.unsqueeze(0))
+        if d_model % 2 == 1:
+            pe[:, 1::2] = torch.cos(position * div_term[:-1])
+        else:
+            pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0), persistent=False)
 
     def forward(self, x):
+        # Use cached positional encodings
         return x + self.pe[:, :x.size(1)]
+
 class TransformerPlanner(nn.Module):
     def __init__(
         self,
         n_track: int = 10,
         n_waypoints: int = 3,
         d_model: int = 64,
+        nhead: int = 8,
+        num_layers: int = 4,  # Reduced from 8 for better performance
+        dropout: float = 0.1,
+        use_checkpoint: bool = False,  # Gradient checkpointing for memory efficiency
     ):
         super().__init__()
 
         self.n_track = n_track
         self.n_waypoints = n_waypoints
-        self.pos_encoder = PositionalEncoding(d_model)
+        self.d_model = d_model
+        self.use_checkpoint = use_checkpoint
+        
+        # Optimized components
+        self.pos_encoder = PositionalEncoding(d_model, max_len=n_track * 2)
+        self.encoder_embed = nn.Linear(2, d_model)
         self.query_embed = nn.Embedding(n_waypoints, d_model)
-        self.encoder_embed = nn.Linear(2, d_model)#project input to higher dimension
-        transformer_decoder_layer = nn.TransformerDecoderLayer(
-            d_model=d_model,
-            nhead=8,
-            batch_first=True,
-        )#embeddings as queries
-        self.transformerdecoder = nn.TransformerDecoder(transformer_decoder_layer, num_layers=8)
+        
+        # Stack layers manually for better control and checkpointing
+        self.transformer_layers = nn.ModuleList([
+            nn.TransformerDecoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=d_model * 2,
+                dropout=dropout,
+                activation='gelu',
+                batch_first=True,
+                norm_first=True,
+            ) for _ in range(num_layers)
+        ])
+        
+        # Output projection with layer norm
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.output_proj = nn.Linear(d_model, 2)
+        
+        # Initialize weights properly
+        self._init_weights()
 
-        self.query_embed = nn.Embedding(n_waypoints, d_model)
-        self.output_proj = nn.Linear(d_model, 2)#project higher dimension to output
+    def _init_weights(self):
+        """Initialize weights for better convergence"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.Embedding):
+                nn.init.normal_(module.weight, 0, 0.02)
+
+    def _checkpoint_layer(self, layer, tgt, memory):
+        """Apply gradient checkpointing to a transformer layer"""
+        if self.use_checkpoint and self.training:
+            return checkpoint.checkpoint(layer, tgt, memory, use_reentrant=False)
+        else:
+            return layer(tgt, memory)
 
     def forward(
         self,
@@ -117,11 +161,28 @@ class TransformerPlanner(nn.Module):
         Returns:
             torch.Tensor: future waypoints with shape (b, n_waypoints, 2)
         """
-        x = torch.cat([track_left, track_right], dim=1)
-        keyvalue=self.encoder_embed(x)
-        keyvalue = self.pos_encoder(keyvalue)
-        query=self.query_embed(torch.arange(self.n_waypoints, device=x.device)).unsqueeze(0).repeat(x.size(0), 1, 1)
-        output=self.output_proj(self.transformerdecoder(query,keyvalue))
+        batch_size = track_left.size(0)
+        device = track_left.device
+        
+        # Concatenate and embed track points
+        x = torch.cat([track_left, track_right], dim=1)  # (B, 2*n_track, 2)
+        memory = self.encoder_embed(x)  # (B, 2*n_track, d_model)
+        memory = self.pos_encoder(memory)
+        
+        # Create query embeddings - cache query indices for efficiency
+        if not hasattr(self, '_cached_query_indices') or self._cached_query_indices.device != device:
+            self._cached_query_indices = torch.arange(self.n_waypoints, device=device)
+        
+        tgt = self.query_embed(self._cached_query_indices).unsqueeze(0).expand(batch_size, -1, -1)
+        
+        # Apply transformer layers with optional checkpointing
+        for layer in self.transformer_layers:
+            tgt = self._checkpoint_layer(layer, tgt, memory)
+        
+        # Apply final layer norm and projection
+        tgt = self.layer_norm(tgt)
+        output = self.output_proj(tgt)
+        
         return output
 
 

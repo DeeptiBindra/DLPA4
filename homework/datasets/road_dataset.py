@@ -116,4 +116,7 @@ def load_data(
         num_workers=num_workers,
         batch_size=batch_size,
         shuffle=shuffle,
+        pin_memory=True,  # Faster GPU transfer
+        persistent_workers=num_workers > 0,  # Keep workers alive between epochs
+        prefetch_factor=2 if num_workers > 0 else None,  # Prefetch batches
     )
