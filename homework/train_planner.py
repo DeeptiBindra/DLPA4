@@ -39,11 +39,36 @@ def train(
     train_data = load_data("drive_data/train", shuffle=True, batch_size=batch_size, num_workers=2)
     val_data = load_data("drive_data/val", shuffle=False, batch_size=batch_size, num_workers=2)
 
-    loss_fn = nn.MSELoss(reduction="none")
+    # Enhanced loss function for transformer planner
     if model_name == "transformer_planner":
-        loss_fn = nn.L1Loss(reduction="none")
-        num_epoch=100
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        # Weighted loss that emphasizes lateral error more
+        def weighted_loss_fn(pred, target):
+            l1_loss = nn.L1Loss(reduction="none")(pred, target)
+            # Weight lateral error (y-axis) more heavily than longitudinal (x-axis)
+            weights = torch.tensor([1.0, 1.5], device=pred.device)  # [longitudinal, lateral]
+            weighted_loss = l1_loss * weights.unsqueeze(0).unsqueeze(0)
+            return weighted_loss
+        loss_fn = weighted_loss_fn
+        num_epoch = 120  # More epochs for better convergence
+        lr = 5e-4  # Lower learning rate for stability
+    else:
+        loss_fn = nn.MSELoss(reduction="none")
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    
+    # Learning rate scheduler for transformer planner
+    if model_name == "transformer_planner":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=20, T_mult=2, eta_min=1e-6
+        )
+    else:
+        scheduler = None
+
+    # Early stopping for transformer planner
+    best_val_loss = float('inf')
+    patience = 15
+    patience_counter = 0
+    best_model_state = None
 
     for epoch in range(num_epoch):
         model.train()
@@ -64,6 +89,11 @@ def train(
             loss = loss_fn(waypoints_pred, waypoints)  # shape: (B, n_waypoints, 2)
             loss = (loss * waypoints_mask.unsqueeze(-1)).mean()
             loss.backward()
+            
+            # Gradient clipping for transformer planner
+            if model_name == "transformer_planner":
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
             train_loss += loss.item()
 
@@ -89,12 +119,34 @@ def train(
                 val_loss += loss.item()
 
         logger.add_scalar(f"{model_name}_val_loss", val_loss / len(val_data), epoch)
+        
+        # Early stopping check for transformer planner
+        current_val_loss = val_loss / len(val_data)
+        if model_name == "transformer_planner":
+            if current_val_loss < best_val_loss:
+                best_val_loss = current_val_loss
+                patience_counter = 0
+                best_model_state = model.state_dict().copy()
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch + 1}")
+                    if best_model_state is not None:
+                        model.load_state_dict(best_model_state)
+                    break
+        
+        # Update learning rate scheduler
+        if scheduler is not None:
+            scheduler.step()
+            logger.add_scalar(f"{model_name}_lr", optimizer.param_groups[0]['lr'], epoch)
 
         if epoch == 0 or epoch == num_epoch - 1 or (epoch + 1) % 10 == 0:
+            lr_str = f" lr={optimizer.param_groups[0]['lr']:.2e}" if scheduler is not None else ""
             print(
                 f"Epoch {epoch + 1:2d} / {num_epoch:2d}: "
                 f"train_loss={train_loss / len(train_data):.4f} "
                 f"val_loss={val_loss / len(val_data):.4f}"
+                f"{lr_str}"
             )
 
     save_model(model)
